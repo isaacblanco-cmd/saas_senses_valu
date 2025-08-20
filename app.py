@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from io import BytesIO
 from datetime import datetime
 import altair as alt
+from pathlib import Path
 
 st.set_page_config(page_title="SaaS Valuation & MRR Dashboard", layout="wide")
 
@@ -165,18 +165,29 @@ st.title("📊 SaaS Valuation & MRR Dashboard")
 st.caption("Sube tu Excel (hojas mínimas: **Prices** y **Data**). Opcional: **CAC**.")
 
 uploaded = st.file_uploader("Cargar Excel (.xlsx)", type=["xlsx"])
+
+# Ruta relativa al repo para la plantilla de ejemplo
+TEMPLATE_PATH = Path(__file__).with_name("SaaS_Final_Template_COMPLETO_with_CAC.xlsx")
+
 example_note = st.expander("¿No tienes el Excel preparado?")
 with example_note:
-    st.markdown("- Descarga un ejemplo con la pestaña **CAC** incluida para rellenar:")
-    st.download_button("📥 Descargar plantilla con CAC", data=open('/mnt/data/SaaS_Final_Template_COMPLETO_with_CAC.xlsx','rb').read(),
-                       file_name='SaaS_Final_Template_COMPLETO_with_CAC.xlsx')
+    if TEMPLATE_PATH.exists():
+        st.download_button("📥 Descargar plantilla con CAC",
+                           data=TEMPLATE_PATH.read_bytes(),
+                           file_name="SaaS_Final_Template_COMPLETO_with_CAC.xlsx")
+    else:
+        st.info("Sube tu propio Excel (hojas Prices y Data). Si quieres, añade una hoja CAC.")
 
 # Cargar hojas
 if uploaded is not None:
     sheets = load_excel(uploaded)
 else:
-    # fallback a la plantilla con CAC
-    sheets = load_excel('/mnt/data/SaaS_Final_Template_COMPLETO_with_CAC.xlsx')
+    # fallback: cargar plantilla del repo si existe, si no, obligar a subir
+    if TEMPLATE_PATH.exists():
+        sheets = load_excel(str(TEMPLATE_PATH))
+    else:
+        st.warning("No se encontró la plantilla en el repo. Sube tu Excel (Prices y Data, opcional CAC).")
+        st.stop()
 
 # Validaciones
 ensure_columns(sheets["Prices"], ["Plan","Price MRR (€)","Price ARR (€)","Multiple (x ARR)"])
@@ -219,15 +230,14 @@ monthly["NRR %"] = (1 + (monthly["Expansion MRR (inferred €)"] - monthly["Chur
                       / monthly["Start MRR (€)"]).replace([np.inf, -np.inf], np.nan) * 100
 monthly["MoM Growth %"] = ((monthly["Total MRR (€)"] - monthly["Start MRR (€)"]) / monthly["Start MRR (€)"] * 100).replace([np.inf, -np.inf], np.nan)
 monthly["ARPU (€)"] = monthly["Total MRR (€)"] / monthly["Active Customers"].replace(0, np.nan)
-monthly["Quick Ratio"] = (monthly["New MRR (€)"] + monthly["Expansion MRR (inferred €)"]) /\
-                         (monthly["Churned MRR (€)"] + monthly["Downgraded MRR (inferred €)"]).replace(0, np.nan)
+monthly["Quick Ratio"] = (monthly["New MRR (€)"] + monthly["Expansion MRR (inferred €)"]) / (monthly["Churned MRR (€)"] + monthly["Downgraded MRR (inferred €)"]).replace(0, np.nan)
 
 # --------- Filtros ---------
 years = sorted(monthly["Date"].dt.year.unique())
 default_year = years[-1] if years else datetime.now().year
 col1, col2, col3 = st.columns([1,1,1])
 with col1:
-    sel_years = st.multiselect("Año(s)", options=years, default=[default_year])
+    sel_years = st.multiselect("Año(s)", options=years, default=[default_year] if years else [])
 with col2:
     sector = st.selectbox("Sector/Perfil", [
         "Horizontal SaaS", "Vertical SaaS", "PLG", "Enterprise", "Fintech SaaS", "Health SaaS", "DevTools", "Otro"
@@ -242,10 +252,7 @@ base_multiples = {
 base_mult = base_multiples.get(sector, 10)
 
 # Filtrado por años
-filt = monthly[monthly["Date"].dt.year.isin(sel_years)].copy()
-if filt.empty and not monthly.empty:
-    st.warning("No hay datos para el año seleccionado. Mostrando todos los datos.")
-    filt = monthly.copy()
+filt = monthly[monthly["Date"].dt.year.isin(sel_years)].copy() if sel_years else monthly.copy()
 
 # --------- KPIs (top) ---------
 last_row = filt.sort_values("Date").iloc[-1] if not filt.empty else monthly.iloc[-1]
@@ -256,9 +263,8 @@ arr_now = mrr_now * 12 if pd.notna(mrr_now) else np.nan
 # CAC desde hoja CAC (en filtros por año)
 if not df_cac.empty:
     df_cac["Date"] = pd.to_datetime(df_cac["Date"]).dt.to_period("M").dt.to_timestamp()
-    cac_year = df_cac[df_cac["Date"].dt.year.isin(sel_years)]
+    cac_year = df_cac[df_cac["Date"].dt.year.isin(sel_years)] if sel_years else df_cac.copy()
     total_spend = cac_year["Sales & Marketing Spend (€)"].sum(min_count=1)
-    # soportar columna 'New Customers' o 'New Customers (from Data)'
     if "New Customers" in cac_year.columns:
         total_new = cac_year["New Customers"].sum(min_count=1)
     else:
@@ -291,13 +297,12 @@ k9.metric("NRR YTD", f"{ytd.get('nrr_ytd', np.nan):.1f}%") if ytd else k9.metric
 st.divider()
 
 # --------- Gráfico 1: Evolución de MRR ---------
+st.subheader("Evolución de MRR")
 line_mrr = alt.Chart(filt).mark_line(point=True).encode(
     x=alt.X('Date:T', title='Mes'),
     y=alt.Y('Total MRR (€):Q', title='MRR (€)'),
     tooltip=['Date:T','Total MRR (€):Q','New MRR (€):Q','Expansion MRR (inferred €):Q','Churned MRR (€):Q','Downgraded MRR (inferred €):Q']
 ).properties(height=300)
-
-st.subheader("Evolución de MRR")
 st.altair_chart(line_mrr, use_container_width=True)
 
 # --------- Gráfico 2: Net New MRR (con filtros de componentes) ---------
@@ -318,13 +323,12 @@ bars = alt.Chart(stack_df).mark_bar().encode(
     color=alt.Color('Tipo:N'),
     tooltip=['Date:T','Tipo:N','€:Q']
 ).properties(height=300)
-
 st.altair_chart(bars, use_container_width=True)
 
 st.divider()
 
 # --------- Tabla por plan (filtros de año aplican) ---------
-plans = comp[comp["Date"].dt.year.isin(sel_years)].copy()
+plans = comp[comp["Date"].dt.year.isin(sel_years)].copy() if sel_years else comp.copy()
 last_by_plan = plans.sort_values("Date").groupby("Plan").tail(1)
 tot_mrr = last_by_plan["MRR (€)"].sum()
 table = (plans.groupby("Plan", as_index=False)
